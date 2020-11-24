@@ -61,7 +61,7 @@ class DFNet(nn.Module):
             self.extKnow = ExternalKnowledge(lang.n_words, hidden_size, n_layers, dropout)
             self.decoder = LocalMemoryDecoder(self.encoder.embedding, lang, hidden_size, self.decoder_hop,
                                               dropout, domains=domains)
-            self.classifier = nn.Linear(self.hidden_size, self.num_labels)
+            self.classifier = KnowledgeClassifier(hidden_size, num_labels=self.num_labels, dropout=dropout)
 
         # Initialize optimizers and criterion
         self.encoder_optimizer = optim.Adam(self.encoder.parameters(), lr=lr)

@@ -228,7 +228,6 @@ class ContextEncoder(nn.Module):
         label = self.global_classifier(global_outputs)
         return outputs_, hidden_, label, scores
 
-
 class ExternalKnowledge(nn.Module):
     def __init__(self, vocab, embedding_dim, hop, dropout):
         super(ExternalKnowledge, self).__init__()
@@ -309,6 +308,20 @@ class ExternalKnowledge(nn.Module):
             u.append(u_k)
         return prob_soft, prob_logits
 
+class KnowledgeClassifier(nn.Module):
+
+    def __init__(self, embedding_dim, num_labels, dropout):
+        super(KnowledgeClassifier, self).__init__()
+        self.embedding_dim = embedding_dim
+        self.num_labels = num_labels
+        self.dropout = dropout
+        self.dropout_layer = nn.Dropout(dropout)
+        self.classifier = nn.Linear(self.embedding_dim, self.num_labels)
+
+    def forward(self, kb_readout):
+        kb_readout = self.dropout(kb_readout)
+        logits = self.classifier(kb_readout)
+        return logits
 
 class LocalMemoryDecoder(nn.Module):
     def __init__(self, shared_emb, lang, hidden_dim, hop, dropout, domains=None):
