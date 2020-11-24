@@ -9,7 +9,7 @@ UNK_token = 0
 
 parser = argparse.ArgumentParser(description='DF-Net')
 
-parser.add_argument('-ds', '--dataset', help='dataset, kvr or woz', required=False, default='kvr')
+parser.add_argument('-ds', '--dataset', help='dataset, kvr or woz or cam', required=False, default='kvr')
 parser.add_argument('-e', '--epoch', help='epoch num', required=False, type=int, default=1000)
 parser.add_argument('-fixed', '--fixed', help='fix seeds', required=False, default=False)
 parser.add_argument('-random_seed', '--random_seed', help='random_seed', required=False, default=1234)
@@ -36,6 +36,8 @@ parser.add_argument('-es', '--earlyStop', help='Early Stop Criteria, BLEU or ENT
 parser.add_argument('-rec', '--record', help='use record function during inference', type=int, required=False,
                     default=1)
 parser.add_argument('-op', '--output', help='output file', required=False, default='output.log')
+parser.add_argument('-lowr', '--low_resource', help='low resource file', required=False, default=None)
+parser.add_argument('-dd', '--data_dir', help='data dir', required=False, default='../dataset/KVR/')
 
 args = vars(parser.parse_args())
 print(str(args))
@@ -43,4 +45,9 @@ USE_CUDA = args['gpu']
 print("USE_CUDA: " + str(USE_CUDA))
 
 LIMIT = int(args["limit"])
-MEM_TOKEN_SIZE = 6 if args["dataset"] == 'kvr' else 12
+if args['dataset'] == 'kvr':
+    MEM_TOKEN_SIZE = 6
+elif args['dataset'] == 'woz':
+    MEM_TOKEN_SIZE = 12
+elif args['dataset'] == 'cam':
+    MEM_TOKEN_SIZE = 11

@@ -13,7 +13,7 @@ def read_langs(file_name, max_line=None):
     data, context_arr, conv_arr, kb_arr = [], [], [], []
     max_resp_len = 0
 
-    with open('data/KVR/kvret_entities.json') as f:
+    with open('../dataset/KVR/kvret_entities.json') as f:
         global_entity = json.load(f)
 
     with open(file_name) as fin:
@@ -28,7 +28,7 @@ def read_langs(file_name, max_line=None):
 
                 nid, line = line.split(' ', 1)
                 if '\t' in line:
-                    u, r, gold_ent = line.split('\t')
+                    u, r, gold_ent, gold_label = line.split('\t')
                     gen_u = generate_memory(u, "$u", str(nid))
                     context_arr += gen_u
                     conv_arr += gen_u
@@ -75,7 +75,9 @@ def read_langs(file_name, max_line=None):
                         'kb_arr': list(kb_arr),
                         'id': int(sample_counter),
                         'ID': int(cnt_lin),
-                        'domain': task_type}
+                        'domain': task_type,
+                        'gold_labels': json.loads(gold_label)
+                    }
                     data.append(data_detail)
 
                     gen_r = generate_memory(r, "$s", str(nid))
@@ -129,6 +131,7 @@ def generate_template(global_entity, sentence, sent_ent, kb_arr, domain):
                             if word in poi_list or word.replace('_', ' ') in poi_list:
                                 ent_type = key
                                 break
+                assert ent_type is not None
                 sketch_response.append('@' + ent_type)
                 gold_sketch.append('@' + ent_type)
     sketch_response = " ".join(sketch_response)
@@ -148,10 +151,13 @@ def generate_memory(sent, speaker, time):
     return sent_new
 
 
-def prepare_data_seq(batch_size=100):
-    file_train = 'data/KVR/train.txt'
-    file_dev = 'data/KVR/dev.txt'
-    file_test = 'data/KVR/test.txt'
+def prepare_data_seq(batch_size=100, low_resource=None, data_dir='../dataset/KVR/'):
+    if low_resource is not None:
+        file_train = data_dir + low_resource
+    else:
+        file_train = data_dir + 'train.txt'
+    file_dev = data_dir + 'dev.txt'
+    file_test = data_dir +'test.txt'
 
     pair_train, train_max_len = read_langs(file_train, max_line=None)
     pair_dev, dev_max_len = read_langs(file_dev, max_line=None)

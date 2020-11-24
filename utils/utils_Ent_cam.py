@@ -13,7 +13,7 @@ def read_langs(file_name, max_line=None):
     data, context_arr, conv_arr, kb_arr = [], [], [], []
     max_resp_len = 0
 
-    with open('../dataset/MULTIWOZ2.1/global_entities.json') as f:
+    with open('../dataset/CamRest676/CamRest676_entities.json') as f:
         global_entity = json.load(f)
 
     with open(file_name) as fin:
@@ -21,7 +21,7 @@ def read_langs(file_name, max_line=None):
         for line in fin:
             line = line.strip()
             if line:
-                if line[-1] == line[0] == "#":
+                if '#' in line:
                     line = line.replace("#", "")
                     task_type = line
                     continue
@@ -35,14 +35,10 @@ def read_langs(file_name, max_line=None):
 
                     # Get gold entity for each domain
                     gold_ent = ast.literal_eval(gold_ent)
-                    ent_idx_restaurant, ent_idx_attraction, ent_idx_hotel = [], [], []
+                    ent_idx_res = []
                     if task_type == "restaurant":
-                        ent_idx_restaurant = gold_ent
-                    elif task_type == "attraction":
-                        ent_idx_attraction = gold_ent
-                    elif task_type == "hotel":
-                        ent_idx_hotel = gold_ent
-                    ent_index = list(set(ent_idx_restaurant + ent_idx_attraction + ent_idx_hotel))
+                        ent_idx_res = gold_ent
+                    ent_index = list(set(ent_idx_res))
 
                     # Get local pointer position for each word in system response
                     ptr_index = []
@@ -68,9 +64,6 @@ def read_langs(file_name, max_line=None):
                         'ptr_index': ptr_index + [len(context_arr)],
                         'selector_index': selector_index,
                         'ent_index': ent_index,
-                        'ent_idx_restaurant': list(set(ent_idx_restaurant)),
-                        'ent_idx_attraction': list(set(ent_idx_attraction)),
-                        'ent_idx_hotel': list(set(ent_idx_hotel)),
                         'conv_arr': list(conv_arr),
                         'kb_arr': list(kb_arr),
                         'id': int(sample_counter),
@@ -100,7 +93,7 @@ def read_langs(file_name, max_line=None):
 
 def generate_template(global_entity, sentence, sent_ent, kb_arr, domain):
     """
-    Based on the system response and the provided entity table, the output is the sketch response. 
+    Based on the system response and the provided entity table, the output is the sketch response.
     """
     sketch_response = []
     gold_sketch = []
@@ -112,16 +105,11 @@ def generate_template(global_entity, sentence, sent_ent, kb_arr, domain):
                 sketch_response.append(word)
             else:
                 ent_type = None
-                for kb_item in kb_arr:
-                    if word == kb_item[0]:
-                        ent_type = kb_item[1]
+                for key in global_entity.keys():
+                    global_entity[key] = [x.lower() for x in global_entity[key]]
+                    if word in global_entity[key] or word.replace('_', ' ') in global_entity[key]:
+                        ent_type = key
                         break
-                if ent_type is None:
-                    for key in global_entity.keys():
-                        global_entity[key] = [x.lower() for x in global_entity[key]]
-                        if word in global_entity[key] or word.replace('_', ' ') in global_entity[key]:
-                            ent_type = key
-                            break
                 assert ent_type is not None
                 sketch_response.append('@' + ent_type)
                 gold_sketch.append('@' + ent_type)
@@ -144,11 +132,11 @@ def generate_memory(sent, speaker, time):
 
 def prepare_data_seq(batch_size=100, low_resource=None):
     if low_resource is not None:
-        file_train = '../dataset/MULTIWOZ2.1/' + low_resource
+        file_train = '../dataset/CamRest676/' + low_resource
     else:
-        file_train = '../dataset/MULTIWOZ2.1/train.txt'
-    file_dev = '../dataset/MULTIWOZ2.1/dev.txt'
-    file_test = '../dataset/MULTIWOZ2.1/test.txt'
+        file_train = '../dataset/CamRest676/train.txt'
+    file_dev = '../dataset/CamRest676/dev.txt'
+    file_test = '../dataset/CamRest676/test.txt'
 
     pair_train, train_max_len = read_langs(file_train, max_line=None)
     pair_dev, dev_max_len = read_langs(file_dev, max_line=None)

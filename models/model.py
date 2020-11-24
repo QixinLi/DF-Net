@@ -12,10 +12,23 @@ from utils.measures import wer, moses_multi_bleu
 from utils.masked_cross_entropy import *
 from utils.config import *
 from models.modules import *
+from torch.nn import BCEWithLogitsLoss
 
+class BCEWithLogLoss(object):
+    def __init__(self):
+        if torch.cuda.is_available():
+            weight = torch.tensor([1., 1., 1., 1., 1., 1., 1., 1., 0.1]).cuda()
+        else:
+            weight = torch.tensor([1., 1., 1., 1., 1., 1., 1., 1., 0.1])
+        self.loss_fn = BCEWithLogitsLoss(pos_weight=weight)
+    def __call__(self, output, target):
+        output = output.float()
+        target = target.float()
+        loss = self.loss_fn(input=output, target=target)
+        return loss
 
 class DFNet(nn.Module):
-    def __init__(self, hidden_size, lang, max_resp_len, path, lr, n_layers, dropout, domains=None):
+    def __init__(self, hidden_size, lang, max_resp_len, path, lr, n_layers, dropout, domains=None, num_labels=9):
         super(DFNet, self).__init__()
         self.input_size = lang.n_words
         self.output_size = lang.n_words
@@ -28,6 +41,7 @@ class DFNet(nn.Module):
         self.decoder_hop = n_layers
         self.softmax = nn.Softmax(dim=0)
         self.domains = domains
+        self.num_labels = num_labels
 
         if path:
             if USE_CUDA:
@@ -35,31 +49,37 @@ class DFNet(nn.Module):
                 self.encoder = torch.load(str(path) + '/enc.th')
                 self.extKnow = torch.load(str(path) + '/enc_kb.th')
                 self.decoder = torch.load(str(path) + '/dec.th')
+                self.classifier = torch.load(str(path) + '/cls.th')
             else:
                 print("MODEL {} LOADED".format(str(path)))
                 self.encoder = torch.load(str(path) + '/enc.th', lambda storage, loc: storage)
                 self.extKnow = torch.load(str(path) + '/enc_kb.th', lambda storage, loc: storage)
                 self.decoder = torch.load(str(path) + '/dec.th', lambda storage, loc: storage)
+                self.classifier = torch.load(str(path) + '/cls.th', lambda storage, loc: storage)
         else:
             self.encoder = ContextEncoder(lang.n_words, hidden_size, dropout, lang.n_chars, domains)
             self.extKnow = ExternalKnowledge(lang.n_words, hidden_size, n_layers, dropout)
             self.decoder = LocalMemoryDecoder(self.encoder.embedding, lang, hidden_size, self.decoder_hop,
                                               dropout, domains=domains)
+            self.classifier = nn.Linear(self.hidden_size, self.num_labels)
 
         # Initialize optimizers and criterion
         self.encoder_optimizer = optim.Adam(self.encoder.parameters(), lr=lr)
         self.extKnow_optimizer = optim.Adam(self.extKnow.parameters(), lr=lr)
         self.decoder_optimizer = optim.Adam(self.decoder.parameters(), lr=lr)
+        self.classifier_optimizer = optim.Adam(self.classifier.parameters(), lr=lr)
         self.scheduler = lr_scheduler.ReduceLROnPlateau(self.decoder_optimizer, mode='max', factor=0.5, patience=1,
                                                         min_lr=0.0001, verbose=True)
         self.criterion_bce = nn.BCELoss()
         self.criterion_label = nn.CrossEntropyLoss()
+        self.criterion_with_weights = BCEWithLogLoss()
         self.reset()
 
         if USE_CUDA:
             self.encoder.cuda()
             self.extKnow.cuda()
             self.decoder.cuda()
+            self.classifier.cuda()
 
     def print_loss(self):
         print_loss_avg = self.loss / self.print_every
@@ -74,9 +94,11 @@ class DFNet(nn.Module):
             name_data = "KVR/"
         elif args['dataset'] == 'woz':
             name_data = "WOZ/"
+        elif args['dataset'] == 'cam':
+            name_data = "CAM/"
         layer_info = str(self.n_layers)
         directory = 'save/DF-Net-' + args["addName"] + name_data + 'HDD' + str(
-            self.hidden_size) + 'BSZ' + str(args['batch']) + 'DR' + str(self.dropout) + 'L' + layer_info + 'lr' + str(
+            self.hidden_size) + 'BSZ' + str(args['batch']) + 'DR' + str(self.dropout) + 'TFR' + str(args["teacher_forcing_ratio"]) + 'L' + layer_info + 'lr' + str(
             self.lr) + str(dec_type)
         if not os.path.exists(directory):
             os.makedirs(directory)
@@ -84,6 +106,7 @@ class DFNet(nn.Module):
         torch.save(self.encoder, directory + '/enc.th')
         torch.save(self.extKnow, directory + '/enc_kb.th')
         torch.save(self.decoder, directory + '/dec.th')
+        torch.save(self.classifier, directory + '/cls.th')
 
     def reset(self):
         self.loss, self.print_every, self.loss_g, self.loss_v, self.loss_l = 0, 1, 0, 0, 0
@@ -100,11 +123,12 @@ class DFNet(nn.Module):
         self.encoder_optimizer.zero_grad()
         self.extKnow_optimizer.zero_grad()
         self.decoder_optimizer.zero_grad()
+        self.classifier_optimizer.zero_grad()
 
         # Encode and Decode
         use_teacher_forcing = random.random() < args['teacher_forcing_ratio']
         max_target_length = max(data['response_lengths'])
-        all_decoder_outputs_vocab, all_decoder_outputs_ptr, _, _, global_pointer, label_e, label_d, label_mix_e, label_mix_d = self.encode_and_decode(
+        all_decoder_outputs_vocab, all_decoder_outputs_ptr, _, _, global_pointer, label_e, label_d, label_mix_e, label_mix_d, cls_logits = self.encode_and_decode(
             data, max_target_length, use_teacher_forcing, False)
 
         # Loss calculation and backpropagation
@@ -120,10 +144,13 @@ class DFNet(nn.Module):
             all_decoder_outputs_ptr.transpose(0, 1).contiguous(),
             data['ptr_index'].contiguous(),
             data['response_lengths'])
+
         loss = loss_g + loss_v + loss_l
 
         loss += self.criterion_label(label_e, data['label_arr'].squeeze(-1))
         loss += self.criterion_label(label_d, data['label_arr'].squeeze(-1))
+        cls_loss = self.criterion_with_weights(cls_logits.view(-1, self.num_labels), torch.tensor(data['gold_labels']))
+        loss += cls_loss
 
         domains = self._cuda(torch.Tensor(domains)).long().unsqueeze(-1)
         loss += masked_cross_entropy(label_mix_e, domains.expand(len(domains), label_mix_e.size(1)).contiguous(),
@@ -136,11 +163,13 @@ class DFNet(nn.Module):
         ec = torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), clip)
         ec = torch.nn.utils.clip_grad_norm_(self.extKnow.parameters(), clip)
         dc = torch.nn.utils.clip_grad_norm_(self.decoder.parameters(), clip)
+        cf = torch.nn.utils.clip_grad_norm_(self.classifier.parameters(), clip)
 
         # Update parameters with optimizers
         self.encoder_optimizer.step()
         self.extKnow_optimizer.step()
         self.decoder_optimizer.step()
+        self.classifier_optimizer.step()
         self.loss += loss.item()
         self.loss_g += loss_g.item()
         self.loss_v += loss_v.item()
@@ -171,9 +200,17 @@ class DFNet(nn.Module):
                                                                    data['conv_char_length'],
                                                                    data['char_seq_recover'],
                                                                    data['domain'])
+        # print(f"dh_outputs.shape: {dh_outputs.size()}") [16, 79, 128]
+        # print(f"dh_hidden.shape: {dh_hidden.size()}") [16, 128]
+        # print(f"label_e.shape: {label_e.size()}") [16, 3]
+        # print(f"label_mix_e.shape: {label_mix_e.size()}") [16, 79, 3]
         global_pointer, kb_readout = self.extKnow.load_memory(story, data['kb_arr_lengths'], data['conv_arr_lengths'],
                                                               dh_hidden, dh_outputs, data['domain'])
+        # print(f"kb_readout.shape: {kb_readout.size()}") # [16, 128]
+        cls_logits = self.classifier(kb_readout)
+
         encoded_hidden = torch.cat((dh_hidden, kb_readout), dim=1)
+        # print(f"encoded_hidden.shape: {encoded_hidden.size()}") # [16, 256]
 
         # Get the words that can be copy from the memory
         batch_size = len(data['context_arr_lengths'])
@@ -198,7 +235,7 @@ class DFNet(nn.Module):
             global_entity_type=global_entity_type,
             domains=data['label_arr'])
 
-        return outputs_vocab, outputs_ptr, decoded_fine, decoded_coarse, global_pointer, label_e, label_d, label_mix_e, label_mix_d
+        return outputs_vocab, outputs_ptr, decoded_fine, decoded_coarse, global_pointer, label_e, label_d, label_mix_e, label_mix_d, cls_logits
 
     def evaluate(self, dev, matric_best, output=False, early_stop=None):
         print("STARTING EVALUATION")
@@ -226,13 +263,19 @@ class DFNet(nn.Module):
             TP_restaurant, FP_restaurant, FN_restaurant = 0, 0, 0
             TP_attraction, FP_attraction, FN_attraction = 0, 0, 0
             TP_hotel, FP_hotel, FN_hotel = 0, 0, 0
+        elif args['dataset'] == 'cam':
+            F1_pred, F1_count = 0, 0
+
+            TP_all, FP_all, FN_all = 0, 0, 0
 
         pbar = tqdm(enumerate(dev), total=len(dev))
 
         if args['dataset'] == 'kvr':
-            entity_path = 'data/KVR/kvret_entities.json'
+            entity_path = '../dataset/KVR/kvret_entities.json'
         elif args['dataset'] == 'woz':
-            entity_path = 'data/MULTIWOZ2.1/global_entities.json'
+            entity_path = '../dataset/MULTIWOZ2.1/global_entities.json'
+        elif args['dataset'] == 'cam':
+            entity_path = '../dataset/CamRest676/CamRest676_entities.json'
 
         with open(entity_path) as f:
             global_entity = json.load(f)
@@ -367,6 +410,19 @@ class DFNet(nn.Module):
                     FP_hotel += single_fp
                     FN_hotel += single_fn
 
+                elif args['dataset'] == 'cam':
+                    # compute F1 SCORE
+                    single_tp, single_fp, single_fn, single_f1, count = self.compute_prf(data_dev['ent_index'][bi],
+                                                                                         pred_sent.split(),
+                                                                                         global_entity_list,
+                                                                                         data_dev['kb_arr_plain'][bi])
+                    F1_pred += single_f1
+                    F1_count += count
+                    TP_all += single_tp
+                    FP_all += single_fp
+                    FN_all += single_fn
+
+
                 # compute Per-response Accuracy Score
                 total += 1
                 if (gold_sent == pred_sent):
@@ -405,6 +461,11 @@ class DFNet(nn.Module):
             print("F1-micro-sche SCORE:\t{}".format(self.compute_F1(P_sche_score, R_sche_score)))
             print("F1-micro-wea SCORE:\t{}".format(self.compute_F1(P_wea_score, R_wea_score)))
             print("F1-micro-nav SCORE:\t{}".format(self.compute_F1(P_nav_score, R_nav_score)))
+
+            print("BLEU SCORE:" + str(bleu_score))
+            print("F1-macro SCORE:\t{}".format(F1_pred / float(F1_count)))
+            print("F1-micro SCORE:\t{}".format(F1_score))
+
         elif args['dataset'] == 'woz':
             print("BLEU SCORE:\t" + str(bleu_score))
             print("F1-macro SCORE:\t{}".format(F1_pred / float(F1_count)))
@@ -431,6 +492,14 @@ class DFNet(nn.Module):
             print("F1-micro-restaurant SCORE:\t{}".format(self.compute_F1(P_restaurant_score, R_restaurant_score)))
             print("F1-micro-attraction SCORE:\t{}".format(self.compute_F1(P_attraction_score, R_attraction_score)))
             print("F1-micro-hotel SCORE:\t{}".format(self.compute_F1(P_hotel_score, R_hotel_score)))
+
+        elif args['dataset'] == 'cam':
+            print("BLEU SCORE:\t" + str(bleu_score))
+            print("F1-macro SCORE:\t{}".format(F1_pred / float(F1_count)))
+            P_score = TP_all / float(TP_all + FP_all) if (TP_all + FP_all) != 0 else 0
+            R_score = TP_all / float(TP_all + FN_all) if (TP_all + FN_all) != 0 else 0
+            F1_score = self.compute_F1(P_score, R_score)
+            print("F1-micro SCORE:\t{}".format(F1_score))
 
         if output:
             print('Test Finish!')
@@ -465,6 +534,11 @@ class DFNet(nn.Module):
                         self.compute_F1(P_attraction_score, R_attraction_score)),
                         file=f)
                     print("F1-micro-hotel SCORE:\t{}".format(self.compute_F1(P_hotel_score, R_hotel_score)), file=f)
+                elif args['dataset'] == 'cam':
+                    print("ACC SCORE:\t" + str(acc_score), file=f)
+                    print("BLEU SCORE:\t" + str(bleu_score), file=f)
+                    print("F1-macro SCORE:\t{}".format(F1_pred / float(F1_count)), file=f)
+                    print("F1-micro SCORE:\t{}".format(self.compute_F1(P_score, R_score)), file=f)
 
         if (early_stop == 'BLEU'):
             if (bleu_score >= matric_best):
@@ -473,7 +547,8 @@ class DFNet(nn.Module):
             return bleu_score
         elif (early_stop == 'ENTF1'):
             if (F1_score >= matric_best):
-                self.save_model('ENTF1-{:.4f}'.format(F1_score))
+                # self.save_model('ENTF1-{:.4f}'.format(F1_score))
+                self.save_model('ENTF1')
                 print("MODEL SAVED")
             return F1_score
         else:
